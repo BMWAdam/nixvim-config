@@ -43,7 +43,7 @@ jobs:
               cloc_data = {'SUM': {'code': 0, 'nFiles': 0}}
 
           stars = os.environ.get('STARS', '0')
-          repo_name = os.environ.get('REPO_NAME', 'bmwadam/tpvselect')
+          repo_name = os.environ.get('REPO_NAME', 'bmwadam/nixvim-config')
           
           total_loc = cloc_data.get('SUM', {}).get('code', 0)
           total_files = cloc_data.get('SUM', {}).get('nFiles', 0)
