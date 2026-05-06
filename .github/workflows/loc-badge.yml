@@ -1,0 +1,200 @@
+name: Repo Overview Generator (Dynamic Colors)
+
+on:
+  push:
+    branches: [ "main" ]
+  workflow_dispatch:
+
+jobs:
+  generate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Install cloc
+        run: sudo apt-get install -y cloc
+
+      - name: Calculate Lines of Code
+        run: cloc --json . > cloc.json
+
+      - name: Fetch Live Repo Stats
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          STARS=$(gh api repos/${{ github.repository }} --jq '.stargazers_count')
+          echo "STARS=$STARS" >> $GITHUB_ENV
+
+      - name: Generate Dynamic SVG Card
+        env:
+          REPO_NAME: ${{ github.repository }}
+        run: |
+          cat << 'EOF' > generate_svg.py
+          import json
+          import os
+          import hashlib
+          import colorsys
+
+          # 1. Load the dynamically generated cloc data
+          try:
+              with open('cloc.json') as f:
+                  cloc_data = json.load(f)
+          except Exception:
+              cloc_data = {'SUM': {'code': 0, 'nFiles': 0}}
+
+          stars = os.environ.get('STARS', '0')
+          repo_name = os.environ.get('REPO_NAME', 'bmwadam/tpvselect')
+          
+          total_loc = cloc_data.get('SUM', {}).get('code', 0)
+          total_files = cloc_data.get('SUM', {}).get('nFiles', 0)
+
+          # 2. Extract and sort languages by LOC
+          langs = [(k, v['code']) for k, v in cloc_data.items() if k not in ['header', 'SUM']]
+          langs.sort(key=lambda x: x[1], reverse=True)
+
+          # 3. Base language color dictionary
+          colors_dict = {
+              "Python": "#3572A5", "JavaScript": "#f1e05a", "TypeScript": "#3178c6", 
+              "HTML": "#e34c26", "CSS": "#563d7c", "Shell": "#89e051", 
+              "C++": "#f34b7d", "C": "#555555", "Rust": "#dea584", 
+              "Go": "#00ADD8", "Java": "#b07219", "Vue": "#41b883",
+              "C#": "#178600", "PHP": "#4F5D95", "Ruby": "#701516", "Kotlin": "#A97BFF",
+              "Swift": "#F05138", "Scala": "#DC322F", "Objective-C": "#438eff", "Dart": "#00B4AB",
+              "R": "#198CE7", "Haskell": "#5e5086", "Elixir": "#6e4a7e", "Lua": "#000080",
+              "Julia": "#a270ba", "Perl": "#0298c3", "SQL": "#e38c00", "Arduino": "#bd79d1",
+              "YAML": "#cb171e", "JSON": "#292929", "Markdown": "#083fa1", "Dockerfile": "#384d54",
+              "Makefile": "#427819", "CMake": "#0032aa"
+          }
+
+          def get_color_for_lang(lang_name):
+              # Helper to generate a consistent, bright HSL color based on language name hash
+              def generate_bright_color(name):
+                  # Create a deterministic MD5 hash of the name, extract first 4 hex chars, and map to 0-360 Hue
+                  h = int(hashlib.md5(name.encode()).hexdigest()[:4], 16) % 360
+                  # hls_to_rgb uses ranges 0.0 - 1.0 (Hue, Lightness, Saturation)
+                  # 65% Lightness ensures visibility on dark backgrounds, 70% Saturation makes it colorful
+                  r, g, b = colorsys.hls_to_rgb(h / 360.0, 0.65, 0.70)
+                  return f"#{int(r*255):02x}{int(g*255):02x}{int(b*255):02x}"
+
+              if lang_name in colors_dict:
+                  hex_color = colors_dict[lang_name].lstrip('#')
+                  # Handle 3-char and 6-char hex codes
+                  if len(hex_color) == 3:
+                      hex_color = ''.join([c*2 for c in hex_color])
+                  r, g, b = tuple(int(hex_color[i:i+2], 16) for i in (0, 2, 4))
+                  
+                  # Calculate perceived brightness (standard formula)
+                  brightness = (r * 299 + g * 587 + b * 114) / 1000
+                  
+                  # JSON is ~41 brightness, C# is ~85. Threshold 80 replaces the dark ones but keeps C#
+                  if brightness < 80: 
+                      return generate_bright_color(lang_name)
+                  return f"#{hex_color}"
+              
+              # Fallback for missing languages
+              return generate_bright_color(lang_name)
+
+          # 4. Build the language progress bar and legend
+          top_langs = langs[:6]
+          bar_svg = ""
+          x_offset = 0
+          legend_svg = ""
+          legend_y = 135
+
+          for i, (lang, lines) in enumerate(top_langs):
+              perc = (lines / total_loc) * 100 if total_loc > 0 else 0
+              color = get_color_for_lang(lang)
+              
+              bar_svg += f'<rect x="{x_offset}%" y="0" width="{perc}%" height="8" fill="{color}"/>\n'
+              x_offset += perc
+
+              col_x = 30 + (i % 2) * 200
+              row_y = legend_y + (i // 2) * 28
+              
+              legend_svg += f'''
+              <circle cx="{col_x}" cy="{row_y - 4}" r="5" fill="{color}"/>
+              <text x="{col_x + 12}" y="{row_y}" fill="{color}" font-weight="500" font-size="13" font-family="Segoe UI, Ubuntu, sans-serif">{lang} <tspan fill="#c9d1d9" font-weight="400">({lines:,} lines)</tspan></text>
+              '''
+
+          # 5. Construct the final SVG
+          svg_template = f'''<svg width="450" height="230" viewBox="0 0 450 230" fill="none" xmlns="http://www.w3.org/2000/svg">
+              <style>
+                  .header {{ font: 600 18px 'Segoe UI', Ubuntu, Sans-Serif; fill: #58a6ff; }}
+                  .stat {{ font: 400 14px 'Segoe UI', Ubuntu, Sans-Serif; fill: #c9d1d9; }}
+                  .icon {{ fill: #8b949e; }}
+              </style>
+              <rect width="449" height="229" x="0.5" y="0.5" fill="#0d1117" stroke="#30363d" rx="6"/>
+              
+              <g transform="translate(25, 35)">
+                  <svg x="0" y="-15" viewBox="0 0 16 16" version="1.1" width="16" height="16">
+                      <path class="icon" fill-rule="evenodd" d="M2 2.5A2.5 2.5 0 014.5 0h8.75a.75.75 0 01.75.75v12.5a.75.75 0 01-.75.75h-2.5a.75.75 0 110-1.5h1.75v-2h-8a1 1 0 00-.714 1.7.75.75 0 01-1.072 1.05A2.495 2.495 0 012 11.5v-9zm10.5-1V9h-8c-.356 0-.694.074-1 .208V2.5a1 1 0 011-1h8zM5 12.25v3.25a.25.25 0 00.4.2l1.45-1.087a.25.25 0 01.3 0L8.6 15.7a.25.25 0 00.4-.2v-3.25a.25.25 0 00-.25-.25h-3.5a.25.25 0 00-.25.25z"/>
+                  </svg>
+                  <text x="25" y="0" class="header">{repo_name}</text>
+              </g>
+              
+              <g transform="translate(25, 75)">
+                  <svg x="0" y="-12" viewBox="0 0 16 16" width="14" height="14">
+                      <path class="icon" fill-rule="evenodd" d="M8 .25a.75.75 0 01.673.418l1.882 3.815 4.21.612a.75.75 0 01.416 1.279l-3.046 2.97.719 4.192a.75.75 0 01-1.088.791L8 12.347l-3.766 1.98a.75.75 0 01-1.088-.79l.72-4.194L.818 6.374a.75.75 0 01.416-1.28l4.21-.611L7.327.668A.75.75 0 018 .25z"/>
+                  </svg>
+                  <text x="20" y="0" class="stat">Stars: {stars}</text>
+              </g>
+              <g transform="translate(130, 75)">
+                  <svg x="0" y="-12" viewBox="0 0 16 16" width="14" height="14">
+                      <path class="icon" fill-rule="evenodd" d="M4.72 3.22a.75.75 0 011.06 1.06L2.06 8l3.72 3.72a.75.75 0 11-1.06 1.06L.47 8.53a.75.75 0 010-1.06l4.25-4.25zm6.56 0a.75.75 0 10-1.06 1.06L13.94 8l-3.72 3.72a.75.75 0 101.06 1.06l4.25-4.25a.75.75 0 000-1.06l-4.25-4.25z"/>
+                  </svg>
+                  <text x="20" y="0" class="stat">LOC: {total_loc:,}</text>
+              </g>
+              <g transform="translate(260, 75)">
+                  <svg x="0" y="-12" viewBox="0 0 16 16" width="14" height="14">
+                      <path class="icon" fill-rule="evenodd" d="M3.75 1.5a.25.25 0 00-.25.25v11.5c0 .138.112.25.25.25h8.5a.25.25 0 00.25-.25V6H9.75A1.75 1.75 0 018 4.25V1.5H3.75zm5.75.56v2.19c0 .138.112.25.25.25h2.19L9.5 2.06zM2 1.75C2 .784 2.784 0 3.75 0h5.086c.464 0 .909.184 1.237.513l3.414 3.414c.329.328.513.773.513 1.237v8.086A1.75 1.75 0 0112.25 15h-8.5A1.75 1.75 0 012 13.25V1.75z"/>
+                  </svg>
+                  <text x="20" y="0" class="stat">Files: {total_files:,}</text>
+              </g>
+
+              <g transform="translate(25, 105)">
+                  <mask id="bar-mask">
+                      <rect width="400" height="8" rx="4" fill="white"/>
+                  </mask>
+                  <g mask="url(#bar-mask)">
+                      {bar_svg}
+                  </g>
+              </g>
+              
+              {legend_svg}
+          </svg>'''
+
+          with open('loc-badge.svg', 'w', encoding='utf-8') as f:
+              f.write(svg_template)
+          EOF
+          python3 generate_svg.py
+
+      - name: Upload badge artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: loc-badge
+          path: loc-badge.svg
+
+  publish:
+    needs: generate
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: badges
+
+      - name: Download artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: loc-badge
+
+      - name: Commit badge
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          mkdir -p badges
+          mv loc-badge.svg badges/
+          git add badges/loc-badge.svg
+          git commit -m "Update dynamic repo overview card" || exit 0
+          git push
